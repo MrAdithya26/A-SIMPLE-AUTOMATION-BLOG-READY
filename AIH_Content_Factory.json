@@ -1,0 +1,851 @@
+{
+  "name": "AIH Content Factory v1.0",
+  "nodes": [
+    {
+      "parameters": {
+        "updates": [
+          "message"
+        ],
+        "additionalFields": {}
+      },
+      "id": "n01-telegram-trigger",
+      "name": "01 - Telegram Trigger",
+      "type": "n8n-nodes-base.telegramTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        -2400,
+        300
+      ],
+      "webhookId": "aih-content-factory-webhook",
+      "credentials": {
+        "telegramApi": {
+          "id": "REPLACE_ME",
+          "name": "AIH Telegram Bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const msg = $input.first().json.message;\nconst jobId = 'AIH-' + Date.now();\n\nlet inputType = 'topic';\nlet inputValue = '';\nlet fileId = null;\nlet fileName = null;\n\nif (msg.document) {\n  inputType = 'pdf';\n  fileId = msg.document.file_id;\n  fileName = msg.document.file_name || 'notification.pdf';\n  inputValue = fileName;\n} else if (msg.text) {\n  const text = msg.text.trim();\n  if (/^https?:\\/\\//i.test(text)) {\n    inputType = 'url';\n    inputValue = text;\n  } else {\n    inputType = 'topic';\n    inputValue = text;\n  }\n}\n\nconst payload = {\n  job: {\n    id: jobId,\n    chatId: msg.chat.id,\n    inputType: inputType,\n    inputValue: inputValue,\n    fileId: fileId,\n    fileName: fileName,\n    receivedAt: new Date().toISOString(),\n    status: 'received',\n    retryCounts: { research: 0, blog: 0, seo: 0, social: 0, gdocs: 0, telegram: 0 }\n  },\n  research: {},\n  article: {},\n  seo: {},\n  social: {},\n  thumbnail: {},\n  schema: {},\n  output: {}\n};\n\nreturn [{ json: payload }];"
+      },
+      "id": "n02-build-payload",
+      "name": "02 - Build Standard Job Payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -2160,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.job.inputType === 'url' ? $json.job.inputValue : 'https://example.com' }}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "text"
+            }
+          },
+          "timeout": 20000
+        }
+      },
+      "id": "n03-fetch-webpage",
+      "name": "03 - Fetch Webpage Content",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -1920,
+        300
+      ],
+      "continueOnFail": true,
+      "alwaysOutputData": true,
+      "onError": "continueRegularOutput",
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "jsCode": "const job = $('02 - Build Standard Job Payload').first().json;\nconst httpResult = $input.first().json;\n\nlet webpageContent = '';\nif (job.job.inputType === 'url' && httpResult && httpResult.data) {\n  webpageContent = String(httpResult.data).slice(0, 15000);\n} else if (job.job.inputType === 'url' && typeof httpResult === 'string') {\n  webpageContent = httpResult.slice(0, 15000);\n}\n\njob.research.rawWebpageContent = webpageContent;\nreturn [{ json: job }];"
+      },
+      "id": "n04-merge-webpage",
+      "name": "04 - Merge Webpage Content Into Payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1680,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.AIH_LLM_API_URL || 'https://api.anthropic.com/v1/messages' }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.AIH_LLM_API_KEY }}"
+            },
+            {
+              "name": "x-api-key",
+              "value": "={{ $env.AIH_LLM_API_KEY }}"
+            },
+            {
+              "name": "anthropic-version",
+              "value": "2023-06-01"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: $env.AIH_LLM_MODEL || 'claude-sonnet-4-6', max_tokens: 4000, temperature: 0.3, system: \"You are the AIH Research Engine for Adithya Info Hub (https://adityainfohub.com).\\nYour job: build a Verified Research JSON from the given input (URL, topic, or PDF notification text).\\n\\nSOURCE PRIORITY ORDER (always prefer the highest available):\\n1. Official Notification\\n2. Official PDF\\n3. Official Website\\n4. Government Portal\\n5. Trusted Government Source\\n6. Input URL (last resort, only if nothing official is found)\\n\\nRESPONSIBILITIES:\\n- Read the provided webpage/article/PDF text.\\n- Detect whether the source is an official website / official notification / official PDF.\\n- Extract and verify factual details only (do not invent facts).\\n- Flag unverifiable or missing fields as null instead of guessing.\\n- Output ONLY valid JSON, no markdown fences, no commentary, matching this schema:\\n{\\n  \\\"sourceType\\\": \\\"official_notification|official_pdf|official_website|government_portal|trusted_government_source|input_url\\\",\\n  \\\"sourceUrl\\\": \\\"string|null\\\",\\n  \\\"verified\\\": true|false,\\n  \\\"title\\\": \\\"string\\\",\\n  \\\"category\\\": \\\"Government Jobs|Private Jobs|Results|Hall Tickets|Scholarships|Government Schemes|Technology|Artificial Intelligence|Cyber Security|Software Tutorials|Career Guidance|Exam Preparation|Government Services\\\",\\n  \\\"summary\\\": \\\"string\\\",\\n  \\\"highlights\\\": [\\\"string\\\"],\\n  \\\"eligibility\\\": \\\"string\\\",\\n  \\\"vacancy\\\": \\\"string\\\",\\n  \\\"ageLimit\\\": \\\"string\\\",\\n  \\\"qualification\\\": \\\"string\\\",\\n  \\\"salary\\\": \\\"string\\\",\\n  \\\"benefits\\\": \\\"string\\\",\\n  \\\"applicationFee\\\": \\\"string\\\",\\n  \\\"selectionProcess\\\": \\\"string\\\",\\n  \\\"examPattern\\\": \\\"string\\\",\\n  \\\"syllabus\\\": \\\"string\\\",\\n  \\\"documents\\\": \\\"string\\\",\\n  \\\"applicationProcess\\\": \\\"string\\\",\\n  \\\"importantDates\\\": \\\"string\\\",\\n  \\\"instructions\\\": \\\"string\\\",\\n  \\\"mistakesToAvoid\\\": \\\"string\\\",\\n  \\\"officialWebsite\\\": \\\"string|null\\\",\\n  \\\"officialNotificationLink\\\": \\\"string|null\\\",\\n  \\\"applyLink\\\": \\\"string|null\\\"\\n}\", messages: [ { role: 'user', content: 'INPUT TYPE: ' + $json.job.inputType + '\\nINPUT VALUE: ' + $json.job.inputValue + '\\nWEBPAGE / PDF TEXT:\\n' + ($json.research.rawWebpageContent || 'No webpage text available - research from topic knowledge and note verified=false if no official source found.') } ] }) }}",
+        "options": {
+          "timeout": 60000
+        }
+      },
+      "id": "n05-ai-research-engine",
+      "name": "05 - AI Research Engine (LLM Call)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -1440,
+        300
+      ],
+      "onError": "continueErrorOutput",
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 3000
+    },
+    {
+      "parameters": {
+        "jsCode": "const job = $('04 - Merge Webpage Content Into Payload').first().json;\nconst aiResponse = $input.first().json;\n\nfunction extractText(resp) {\n  if (resp && resp.content && Array.isArray(resp.content)) {\n    return resp.content.map(b => b.text || '').join('\\n');\n  }\n  if (resp && resp.candidates) {\n    return resp.candidates[0]?.content?.parts?.map(p => p.text).join('\\n') || '';\n  }\n  if (typeof resp === 'string') return resp;\n  return JSON.stringify(resp);\n}\n\nlet text = extractText(aiResponse).trim();\ntext = text.replace(/^```json/i, '').replace(/^```/, '').replace(/```$/, '').trim();\n\nlet parsed;\ntry {\n  parsed = JSON.parse(text);\n} catch (e) {\n  parsed = { verified: false, parseError: true, rawText: text.slice(0, 2000) };\n}\n\njob.research = Object.assign({}, job.research, parsed);\njob.job.status = 'research_complete';\nreturn [{ json: job }];"
+      },
+      "id": "n06-parse-research",
+      "name": "06 - Parse Research JSON",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1200,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.AIH_LLM_API_URL || 'https://api.anthropic.com/v1/messages' }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.AIH_LLM_API_KEY }}"
+            },
+            {
+              "name": "x-api-key",
+              "value": "={{ $env.AIH_LLM_API_KEY }}"
+            },
+            {
+              "name": "anthropic-version",
+              "value": "2023-06-01"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: $env.AIH_LLM_MODEL || 'claude-sonnet-4-6', max_tokens: 8000, temperature: 0.3, system: \"You are the AIH Master Prompt writer for Adithya Info Hub (adityainfohub.com).\\n\\nLANGUAGE: Natural Telugu + English mix (never pure Telugu, never pure English, never AI-sounding content).\\nTONE: Friendly, professional, trustworthy, beginner-friendly, human, readable.\\n\\nWRITE A COMPLETE ARTICLE using the Verified Research JSON provided. Output ONLY valid JSON (no markdown fences) matching this schema:\\n{\\n  \\\"heroTitle\\\": \\\"string\\\",\\n  \\\"quickSummary\\\": \\\"string\\\",\\n  \\\"tableOfContents\\\": [\\\"string\\\"],\\n  \\\"introduction\\\": \\\"string\\\",\\n  \\\"latestUpdate\\\": \\\"string\\\",\\n  \\\"overview\\\": \\\"string\\\",\\n  \\\"highlights\\\": [\\\"string\\\"],\\n  \\\"eligibility\\\": \\\"string (html allowed)\\\",\\n  \\\"vacancy\\\": \\\"string\\\",\\n  \\\"ageLimit\\\": \\\"string\\\",\\n  \\\"qualification\\\": \\\"string\\\",\\n  \\\"salary\\\": \\\"string\\\",\\n  \\\"benefits\\\": \\\"string\\\",\\n  \\\"applicationFee\\\": \\\"string\\\",\\n  \\\"selectionProcess\\\": \\\"string\\\",\\n  \\\"examPattern\\\": \\\"string\\\",\\n  \\\"syllabus\\\": \\\"string\\\",\\n  \\\"documents\\\": \\\"string\\\",\\n  \\\"applicationProcess\\\": \\\"string\\\",\\n  \\\"importantDates\\\": \\\"string (table format as markdown)\\\",\\n  \\\"instructions\\\": \\\"string\\\",\\n  \\\"mistakesToAvoid\\\": \\\"string\\\",\\n  \\\"faqs\\\": [{\\\"question\\\": \\\"string\\\", \\\"answer\\\": \\\"string\\\"}],\\n  \\\"officialWebsite\\\": \\\"string\\\",\\n  \\\"officialNotification\\\": \\\"string\\\",\\n  \\\"applyLink\\\": \\\"string\\\",\\n  \\\"relatedArticles\\\": [\\\"string\\\"],\\n  \\\"conclusion\\\": \\\"string\\\",\\n  \\\"aihTip\\\": \\\"string\\\",\\n  \\\"reminder\\\": \\\"string\\\"\\n}\\nOnly use official links from the research JSON. Never fabricate links or facts not present in the research JSON.\", messages: [ { role: 'user', content: 'VERIFIED RESEARCH JSON:\\n' + JSON.stringify($json.research) } ] }) }}",
+        "options": {
+          "timeout": 90000
+        }
+      },
+      "id": "n07-ai-blog-writer",
+      "name": "07 - AI Blog Writer (LLM Call)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -960,
+        300
+      ],
+      "onError": "continueErrorOutput",
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 3000
+    },
+    {
+      "parameters": {
+        "jsCode": "const job = $('06 - Parse Research JSON').first().json;\nconst aiResponse = $input.first().json;\n\nfunction extractText(resp) {\n  if (resp && resp.content && Array.isArray(resp.content)) {\n    return resp.content.map(b => b.text || '').join('\\n');\n  }\n  if (resp && resp.candidates) {\n    return resp.candidates[0]?.content?.parts?.map(p => p.text).join('\\n') || '';\n  }\n  if (typeof resp === 'string') return resp;\n  return JSON.stringify(resp);\n}\n\nlet text = extractText(aiResponse).trim();\ntext = text.replace(/^```json/i, '').replace(/^```/, '').replace(/```$/, '').trim();\n\nlet parsed;\ntry {\n  parsed = JSON.parse(text);\n} catch (e) {\n  parsed = { parseError: true, rawText: text.slice(0, 2000) };\n}\n\njob.article = parsed;\njob.job.status = 'article_complete';\nreturn [{ json: job }];"
+      },
+      "id": "n08-parse-article",
+      "name": "08 - Parse Article JSON",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -720,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.AIH_LLM_API_URL || 'https://api.anthropic.com/v1/messages' }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.AIH_LLM_API_KEY }}"
+            },
+            {
+              "name": "x-api-key",
+              "value": "={{ $env.AIH_LLM_API_KEY }}"
+            },
+            {
+              "name": "anthropic-version",
+              "value": "2023-06-01"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: $env.AIH_LLM_MODEL || 'claude-sonnet-4-6', max_tokens: 3000, temperature: 0.3, system: \"You are the AIH SEO Engine for adityainfohub.com. Given the article JSON, generate SEO metadata.\\nOutput ONLY valid JSON (no markdown fences) matching this schema:\\n{\\n  \\\"seoTitle\\\": \\\"string (max 60 chars)\\\",\\n  \\\"metaTitle\\\": \\\"string\\\",\\n  \\\"metaDescription\\\": \\\"string (max 155 chars)\\\",\\n  \\\"slug\\\": \\\"string-kebab-case\\\",\\n  \\\"focusKeyword\\\": \\\"string\\\",\\n  \\\"secondaryKeywords\\\": [\\\"string\\\"],\\n  \\\"tags\\\": [\\\"string\\\"],\\n  \\\"category\\\": \\\"string\\\",\\n  \\\"excerpt\\\": \\\"string\\\",\\n  \\\"canonicalUrl\\\": \\\"string\\\",\\n  \\\"readingTimeMinutes\\\": 0,\\n  \\\"imageAlt\\\": \\\"string\\\",\\n  \\\"rankMathScoreEstimate\\\": \\\"string\\\",\\n  \\\"schema\\\": {\\n    \\\"breadcrumbSchema\\\": {},\\n    \\\"articleSchema\\\": {},\\n    \\\"faqSchema\\\": {},\\n    \\\"organizationSchema\\\": {}\\n  }\\n}\\nFollow Rank Math best practices and Google Discover readiness.\", messages: [ { role: 'user', content: 'ARTICLE JSON:\\n' + JSON.stringify($json.article) } ] }) }}",
+        "options": {
+          "timeout": 60000
+        }
+      },
+      "id": "n09-ai-seo-engine",
+      "name": "09 - AI SEO Engine (LLM Call)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -480,
+        180
+      ],
+      "onError": "continueErrorOutput",
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 3000
+    },
+    {
+      "parameters": {
+        "jsCode": "const job = $('08 - Parse Article JSON').first().json;\nconst aiResponse = $input.first().json;\n\nfunction extractText(resp) {\n  if (resp && resp.content && Array.isArray(resp.content)) {\n    return resp.content.map(b => b.text || '').join('\\n');\n  }\n  if (resp && resp.candidates) {\n    return resp.candidates[0]?.content?.parts?.map(p => p.text).join('\\n') || '';\n  }\n  if (typeof resp === 'string') return resp;\n  return JSON.stringify(resp);\n}\n\nlet text = extractText(aiResponse).trim();\ntext = text.replace(/^```json/i, '').replace(/^```/, '').replace(/```$/, '').trim();\n\nlet parsed;\ntry {\n  parsed = JSON.parse(text);\n} catch (e) {\n  parsed = { parseError: true, rawText: text.slice(0, 2000) };\n}\n\njob.seo = parsed;\njob.schema = parsed.schema || {};\njob.job.status = 'seo_complete';\nreturn [{ json: job }];"
+      },
+      "id": "n10-parse-seo",
+      "name": "10 - Parse SEO JSON",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -240,
+        180
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.AIH_LLM_API_URL || 'https://api.anthropic.com/v1/messages' }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.AIH_LLM_API_KEY }}"
+            },
+            {
+              "name": "x-api-key",
+              "value": "={{ $env.AIH_LLM_API_KEY }}"
+            },
+            {
+              "name": "anthropic-version",
+              "value": "2023-06-01"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: $env.AIH_LLM_MODEL || 'claude-sonnet-4-6', max_tokens: 3000, temperature: 0.4, system: \"You are the AIH Social Media Engine for Adithya Info Hub. Given the article JSON, generate\\nplatform-specific social captions. Each platform must have a DIFFERENT tone and wording - no duplicate captions across platforms.\\nOutput ONLY valid JSON (no markdown fences) matching this schema:\\n{\\n  \\\"instagram\\\": \\\"string (with hashtags)\\\",\\n  \\\"facebook\\\": \\\"string\\\",\\n  \\\"telegram\\\": \\\"string (markdown, with official link)\\\",\\n  \\\"whatsapp\\\": \\\"string (short, forward-friendly)\\\",\\n  \\\"linkedin\\\": \\\"string (professional tone)\\\",\\n  \\\"threads\\\": \\\"string (casual, short)\\\",\\n  \\\"twitter\\\": \\\"string (max 280 chars, with hashtags)\\\",\\n  \\\"pinterest\\\": \\\"string (description style)\\\",\\n  \\\"youtubeDescription\\\": \\\"string\\\",\\n  \\\"youtubeCommunity\\\": \\\"string\\\"\\n}\", messages: [ { role: 'user', content: 'ARTICLE JSON:\\n' + JSON.stringify($json.article) } ] }) }}",
+        "options": {
+          "timeout": 60000
+        }
+      },
+      "id": "n11-ai-social-engine",
+      "name": "11 - AI Social Media Engine (LLM Call)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -480,
+        420
+      ],
+      "onError": "continueErrorOutput",
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 3000
+    },
+    {
+      "parameters": {
+        "jsCode": "const job = $('08 - Parse Article JSON').first().json;\nconst aiResponse = $input.first().json;\n\nfunction extractText(resp) {\n  if (resp && resp.content && Array.isArray(resp.content)) {\n    return resp.content.map(b => b.text || '').join('\\n');\n  }\n  if (resp && resp.candidates) {\n    return resp.candidates[0]?.content?.parts?.map(p => p.text).join('\\n') || '';\n  }\n  if (typeof resp === 'string') return resp;\n  return JSON.stringify(resp);\n}\n\nlet text = extractText(aiResponse).trim();\ntext = text.replace(/^```json/i, '').replace(/^```/, '').replace(/```$/, '').trim();\n\nlet parsed;\ntry {\n  parsed = JSON.parse(text);\n} catch (e) {\n  parsed = { parseError: true, rawText: text.slice(0, 2000) };\n}\n\njob.social = parsed;\njob.job.status = 'social_complete';\nreturn [{ json: job }];"
+      },
+      "id": "n12-parse-social",
+      "name": "12 - Parse Social Media JSON",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -240,
+        420
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineAll",
+        "options": {}
+      },
+      "id": "n13-merge-seo-social",
+      "name": "13 - Merge SEO + Social Branches",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3,
+      "position": [
+        0,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Combine SEO branch (index 0) and Social branch (index 1) back into one job object\nconst items = $input.all();\nlet seoJob = null;\nlet socialJob = null;\n\nfor (const it of items) {\n  if (it.json.seo) seoJob = it.json;\n  if (it.json.social) socialJob = it.json;\n}\n\nconst base = seoJob || socialJob;\nconst merged = Object.assign({}, base, {\n  seo: seoJob ? seoJob.seo : {},\n  schema: seoJob ? seoJob.schema : {},\n  social: socialJob ? socialJob.social : {}\n});\nmerged.job.status = 'ready_for_doc_assembly';\nreturn [{ json: merged }];"
+      },
+      "id": "n14-consolidate-payload",
+      "name": "14 - Consolidate Full Payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const job = $input.first().json;\nconst a = job.article || {};\nconst s = job.seo || {};\nconst soc = job.social || {};\n\nfunction block(title, content) {\n  if (!content) return '';\n  return '\\n\\n' + title.toUpperCase() + '\\n' + '-'.repeat(title.length) + '\\n' + (Array.isArray(content) ? content.join('\\n') : String(content));\n}\n\nconst thumbnailPrompt = `Create a clean, modern, mobile-friendly thumbnail for a ${s.category || 'government jobs'} blog post titled \"${a.heroTitle || ''}\". Bold Telugu+English title text, AIH brand colors, official/trustworthy visual style, 1280x720, no clutter.`;\n\nlet doc = '';\ndoc += 'AIH CONTENT FACTORY - GOOGLE DOC PACKAGE\\n';\ndoc += 'Job ID: ' + job.job.id + '\\n';\ndoc += 'Generated: ' + new Date().toISOString() + '\\n';\ndoc += '\\n=== SEO ===';\ndoc += block('SEO Title', s.seoTitle);\ndoc += block('Meta Title', s.metaTitle);\ndoc += block('Meta Description', s.metaDescription);\ndoc += block('Slug', s.slug);\ndoc += block('Focus Keyword', s.focusKeyword);\ndoc += block('Secondary Keywords', s.secondaryKeywords);\ndoc += block('Tags', s.tags);\ndoc += block('Category', s.category);\ndoc += block('Excerpt', s.excerpt);\ndoc += block('Reading Time (minutes)', s.readingTimeMinutes);\ndoc += block('Image ALT', s.imageAlt);\n\ndoc += '\\n\\n=== BLOG ARTICLE ===';\ndoc += block('Hero Title', a.heroTitle);\ndoc += block('Quick Summary', a.quickSummary);\ndoc += block('Table of Contents', a.tableOfContents);\ndoc += block('Introduction', a.introduction);\ndoc += block('Latest Update', a.latestUpdate);\ndoc += block('Overview', a.overview);\ndoc += block('Highlights', a.highlights);\ndoc += block('Eligibility', a.eligibility);\ndoc += block('Vacancy', a.vacancy);\ndoc += block('Age Limit', a.ageLimit);\ndoc += block('Qualification', a.qualification);\ndoc += block('Salary', a.salary);\ndoc += block('Benefits', a.benefits);\ndoc += block('Application Fee', a.applicationFee);\ndoc += block('Selection Process', a.selectionProcess);\ndoc += block('Exam Pattern', a.examPattern);\ndoc += block('Syllabus', a.syllabus);\ndoc += block('Documents', a.documents);\ndoc += block('Application Process', a.applicationProcess);\ndoc += block('Important Dates', a.importantDates);\ndoc += block('Instructions', a.instructions);\ndoc += block('Mistakes to Avoid', a.mistakesToAvoid);\nif (a.faqs && a.faqs.length) {\n  doc += '\\n\\nFAQS\\n----\\n';\n  a.faqs.forEach(f => { doc += 'Q: ' + f.question + '\\nA: ' + f.answer + '\\n\\n'; });\n}\ndoc += block('Official Website', a.officialWebsite);\ndoc += block('Official Notification', a.officialNotification);\ndoc += block('Apply Link', a.applyLink);\ndoc += block('Related Articles', a.relatedArticles);\ndoc += block('Conclusion', a.conclusion);\ndoc += block('AIH Tip', a.aihTip);\ndoc += block('Reminder', a.reminder);\n\ndoc += '\\n\\n=== THUMBNAIL PROMPT ===\\n' + thumbnailPrompt;\n\ndoc += '\\n\\n=== SOCIAL MEDIA ===';\ndoc += block('Instagram', soc.instagram);\ndoc += block('Facebook', soc.facebook);\ndoc += block('Telegram', soc.telegram);\ndoc += block('WhatsApp', soc.whatsapp);\ndoc += block('LinkedIn', soc.linkedin);\ndoc += block('Threads', soc.threads);\ndoc += block('Twitter / X', soc.twitter);\ndoc += block('Pinterest', soc.pinterest);\ndoc += block('YouTube Description', soc.youtubeDescription);\ndoc += block('YouTube Community', soc.youtubeCommunity);\n\ndoc += '\\n\\n=== SCHEMA (JSON-LD) ===\\n' + JSON.stringify(job.schema || {}, null, 2);\n\ndoc += '\\n\\n=== QUALITY CHECKLIST ===\\n';\ndoc += '[ ] Official Source Verified\\n[ ] Human Written\\n[ ] Beginner Friendly\\n[ ] SEO Optimized\\n';\ndoc += '[ ] Google Discover Ready\\n[ ] Rank Math Ready\\n[ ] Mobile Friendly\\n[ ] WordPress Ready\\n';\ndoc += '[ ] Tables Added\\n[ ] FAQs Added\\n[ ] Schema Added\\n[ ] Internal Links Suggested\\n';\ndoc += '[ ] Official Links Only\\n[ ] Social Media Generated\\n[ ] Thumbnail Prompt Generated\\n';\n\njob.output.googleDocContent = doc;\njob.output.thumbnailPrompt = thumbnailPrompt;\njob.output.docTitle = (a.heroTitle || job.job.inputValue || job.job.id) + ' | AIH';\n\nconst now = new Date();\njob.output.yearFolderName = String(now.getFullYear());\nconst monthNames = ['January','February','March','April','May','June','July','August','September','October','November','December'];\njob.output.monthFolderName = monthNames[now.getMonth()];\n\nreturn [{ json: job }];"
+      },
+      "id": "n15-assemble-doc",
+      "name": "15 - Assemble Google Doc Content",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        480,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "folder",
+        "name": "={{ $json.output.yearFolderName }}",
+        "driveId": {
+          "mode": "list",
+          "value": "My Drive"
+        },
+        "folderId": {
+          "mode": "id",
+          "value": "={{ $env.AIH_GDRIVE_ROOT_FOLDER_ID || 'root' }}"
+        }
+      },
+      "id": "n16-create-year-folder",
+      "name": "16 - Create/Get Year Folder",
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 3,
+      "position": [
+        720,
+        300
+      ],
+      "continueOnFail": true,
+      "credentials": {
+        "googleDriveOAuth2Api": {
+          "id": "REPLACE_ME",
+          "name": "AIH Google Drive"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "resource": "folder",
+        "name": "={{ $('15 - Assemble Google Doc Content').first().json.output.monthFolderName }}",
+        "driveId": {
+          "mode": "list",
+          "value": "My Drive"
+        },
+        "folderId": {
+          "mode": "id",
+          "value": "={{ $json.id }}"
+        }
+      },
+      "id": "n17-create-month-folder",
+      "name": "17 - Create/Get Month Folder",
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 3,
+      "position": [
+        960,
+        300
+      ],
+      "continueOnFail": true,
+      "credentials": {
+        "googleDriveOAuth2Api": {
+          "id": "REPLACE_ME",
+          "name": "AIH Google Drive"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "resource": "document",
+        "operation": "create",
+        "title": "={{ $('15 - Assemble Google Doc Content').first().json.output.docTitle }}",
+        "folderId": {
+          "mode": "id",
+          "value": "={{ $json.id }}"
+        }
+      },
+      "id": "n18-gdocs-create",
+      "name": "18 - Create Google Doc",
+      "type": "n8n-nodes-base.googleDocs",
+      "typeVersion": 2,
+      "position": [
+        1200,
+        300
+      ],
+      "onError": "continueErrorOutput",
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 3000,
+      "credentials": {
+        "googleDocsOAuth2Api": {
+          "id": "REPLACE_ME",
+          "name": "AIH Google Docs"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "resource": "document",
+        "operation": "update",
+        "documentURL": "={{ $json.id }}",
+        "actionsUi": {
+          "actionFields": [
+            {
+              "action": "insert",
+              "text": "={{ $('15 - Assemble Google Doc Content').first().json.output.googleDocContent }}",
+              "insertionLocation": "insertAtEnd"
+            }
+          ]
+        }
+      },
+      "id": "n19-gdocs-insert",
+      "name": "19 - Insert Doc Content",
+      "type": "n8n-nodes-base.googleDocs",
+      "typeVersion": 2,
+      "position": [
+        1440,
+        300
+      ],
+      "onError": "continueErrorOutput",
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 3000,
+      "credentials": {
+        "googleDocsOAuth2Api": {
+          "id": "REPLACE_ME",
+          "name": "AIH Google Docs"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const job = $('15 - Assemble Google Doc Content').first().json;\nconst docNode = $('18 - Create Google Doc').first().json;\n\njob.output.googleDocId = docNode.id;\njob.output.googleDocUrl = docNode.webViewLink || ('https://docs.google.com/document/d/' + docNode.id + '/edit');\njob.job.status = 'doc_created';\nreturn [{ json: job }];"
+      },
+      "id": "n20-attach-doc-link",
+      "name": "20 - Attach Doc Link To Payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1680,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $json.job.chatId }}",
+        "text": "=🎉 AIH Content Factory - Job Complete!\\n\\n📌 Job ID: {{ $json.job.id }}\\n📰 Title: {{ $json.article.heroTitle }}\\n✅ Official Source Used: {{ $json.research.verified ? 'Yes' : 'Please verify manually' }}\\n📄 Google Doc: {{ $json.output.googleDocUrl }}\\n\\nBlog, SEO, and social media content are ready for manual WordPress publishing.",
+        "additionalFields": {
+          "parse_mode": "Markdown"
+        }
+      },
+      "id": "n21-telegram-success",
+      "name": "21 - Send Success Notification",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1920,
+        300
+      ],
+      "onError": "continueErrorOutput",
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 2000,
+      "credentials": {
+        "telegramApi": {
+          "id": "REPLACE_ME",
+          "name": "AIH Telegram Bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const item = $input.first().json;\nconst errMsg = item.error ? (item.error.message || JSON.stringify(item.error)) : 'Unknown error';\n\nlet chatId = null;\ntry {\n  chatId = $('02 - Build Standard Job Payload').first().json.job.chatId;\n} catch (e) {\n  chatId = null;\n}\n\nreturn [{ json: {\n  chatId: chatId,\n  errorText: '⚠️ AIH Content Factory - Job Failed\\n\\nNode: ' + ($node ? $node.name : 'unknown') + '\\nError: ' + errMsg + '\\nTime: ' + new Date().toISOString()\n} }];"
+      },
+      "id": "n22-format-error",
+      "name": "22 - Format Error Message",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -480,
+        700
+      ]
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $json.chatId }}",
+        "text": "={{ $json.errorText }}",
+        "additionalFields": {}
+      },
+      "id": "n23-telegram-error",
+      "name": "23 - Send Error Notification",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        -240,
+        700
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "REPLACE_ME",
+          "name": "AIH Telegram Bot"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "01 - Telegram Trigger": {
+      "main": [
+        [
+          {
+            "node": "02 - Build Standard Job Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "02 - Build Standard Job Payload": {
+      "main": [
+        [
+          {
+            "node": "03 - Fetch Webpage Content",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "03 - Fetch Webpage Content": {
+      "main": [
+        [
+          {
+            "node": "04 - Merge Webpage Content Into Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "04 - Merge Webpage Content Into Payload": {
+      "main": [
+        [
+          {
+            "node": "05 - AI Research Engine (LLM Call)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "05 - AI Research Engine (LLM Call)": {
+      "main": [
+        [
+          {
+            "node": "06 - Parse Research JSON",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "22 - Format Error Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "06 - Parse Research JSON": {
+      "main": [
+        [
+          {
+            "node": "07 - AI Blog Writer (LLM Call)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "07 - AI Blog Writer (LLM Call)": {
+      "main": [
+        [
+          {
+            "node": "08 - Parse Article JSON",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "22 - Format Error Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "08 - Parse Article JSON": {
+      "main": [
+        [
+          {
+            "node": "09 - AI SEO Engine (LLM Call)",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "11 - AI Social Media Engine (LLM Call)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "09 - AI SEO Engine (LLM Call)": {
+      "main": [
+        [
+          {
+            "node": "10 - Parse SEO JSON",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "22 - Format Error Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "11 - AI Social Media Engine (LLM Call)": {
+      "main": [
+        [
+          {
+            "node": "12 - Parse Social Media JSON",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "22 - Format Error Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "10 - Parse SEO JSON": {
+      "main": [
+        [
+          {
+            "node": "13 - Merge SEO + Social Branches",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "12 - Parse Social Media JSON": {
+      "main": [
+        [
+          {
+            "node": "13 - Merge SEO + Social Branches",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "13 - Merge SEO + Social Branches": {
+      "main": [
+        [
+          {
+            "node": "14 - Consolidate Full Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "14 - Consolidate Full Payload": {
+      "main": [
+        [
+          {
+            "node": "15 - Assemble Google Doc Content",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "15 - Assemble Google Doc Content": {
+      "main": [
+        [
+          {
+            "node": "16 - Create/Get Year Folder",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "16 - Create/Get Year Folder": {
+      "main": [
+        [
+          {
+            "node": "17 - Create/Get Month Folder",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "17 - Create/Get Month Folder": {
+      "main": [
+        [
+          {
+            "node": "18 - Create Google Doc",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "18 - Create Google Doc": {
+      "main": [
+        [
+          {
+            "node": "19 - Insert Doc Content",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "22 - Format Error Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "19 - Insert Doc Content": {
+      "main": [
+        [
+          {
+            "node": "20 - Attach Doc Link To Payload",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "22 - Format Error Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "20 - Attach Doc Link To Payload": {
+      "main": [
+        [
+          {
+            "node": "21 - Send Success Notification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "21 - Send Success Notification": {
+      "main": [
+        [],
+        [
+          {
+            "node": "22 - Format Error Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "22 - Format Error Message": {
+      "main": [
+        [
+          {
+            "node": "23 - Send Error Notification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": false
+  }
+}
